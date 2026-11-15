@@ -85,7 +85,7 @@ https://www.youtube.com/playlist?list=PLxxxxxxxx
 - A YouTube playlist link is expanded into all of its videos.
 - Lines that aren't YouTube links are skipped; the bot tells you which line numbers.
 - Up to 500 tracks are queued per load.
-- Loading is instant: titles and streams are looked up when each track starts playing. Videos that turn out to be removed or blocked are skipped automatically.
+- Loading is instant. Titles and durations are looked up in the background for the next 10 tracks, and `/queue` looks up the page you ask for (it may take a few seconds the first time). The full 500 aren't looked up at once, to avoid YouTube rate limits. Videos that turn out to be removed or blocked are skipped automatically.
 
 See `playlists/example.txt`.
 

@@ -11,7 +11,7 @@ import asyncio
 import logging
 import random
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 import discord
@@ -29,10 +29,16 @@ class Track:
     title: str | None
     duration: int | None  # seconds
     requested_by: str  # display name
+    # Background title/duration lookup for the queue view: "pending", "done" or "failed".
+    lookup: Literal["pending", "done", "failed"] = field(default="pending", compare=False)
 
     @property
     def label(self) -> str:
         return self.title or self.page_url
+
+    @property
+    def needs_metadata(self) -> bool:
+        return self.lookup == "pending" and (self.title is None or self.duration is None)
 
 
 def format_duration(seconds: int | None) -> str:
@@ -121,6 +127,7 @@ class GuildPlayer:
         *,
         resolver: Callable[[str], tuple[str | None, int | None, str]] | None = None,
         source_factory: Callable[[str, float], discord.AudioSource] = make_source,
+        metadata_fetcher: Callable[[str], tuple[str | None, int | None]] | None = None,
         on_destroy: Callable[[int], None] | None = None,
     ):
         self.guild_id = guild_id
@@ -132,6 +139,9 @@ class GuildPlayer:
 
         self._resolver = resolver or ytdl.resolve_stream
         self._source_factory = source_factory
+        self._metadata_fetcher = metadata_fetcher or ytdl.fetch_metadata
+        self._metadata_semaphore = asyncio.Semaphore(config.METADATA_CONCURRENCY)
+        self._metadata_tasks: dict[int, asyncio.Task] = {}  # id(track) -> lookup task
         self._on_destroy = on_destroy
         self._lock = asyncio.Lock()
         self._skip_requested = False
@@ -151,6 +161,7 @@ class GuildPlayer:
         position = self.queue.add(tracks)
         if self.queue.current is None:
             self.loop.create_task(self._start_if_idle(announce=announce))
+        self.warm_up_queue()
         return position
 
     def skip(self) -> bool:
@@ -185,6 +196,54 @@ class GuildPlayer:
         source = self.voice.source if self.voice else None
         if isinstance(source, discord.PCMVolumeTransformer):
             source.volume = self.volume
+
+    # ---- metadata for the queue view ---------------------------------------
+    # Tracks from playlist files (and some YouTube playlist entries) arrive
+    # without a title or duration. Looking them all up at once would be slow
+    # and could get the bot rate-limited, so only the tracks someone is about
+    # to see are looked up: the next page of the queue in the background, and
+    # whatever page /queue is asked to show.
+
+    def prefetch_metadata(self, tracks: list[Track]) -> list[asyncio.Task]:
+        """Start lookups for tracks missing a title or duration. Returns the running tasks."""
+        tasks = []
+        for track in tracks:
+            if not track.needs_metadata or self.destroyed:
+                continue
+            task = self._metadata_tasks.get(id(track))
+            if task is None:
+                task = self.loop.create_task(self._fetch_metadata(track))
+                self._metadata_tasks[id(track)] = task
+            tasks.append(task)
+        return tasks
+
+    def warm_up_queue(self) -> None:
+        """Look up the first page of upcoming tracks in the background."""
+        self.prefetch_metadata(list(self.queue.upcoming)[: config.QUEUE_PAGE_SIZE])
+
+    async def ensure_metadata(self, tracks: list[Track], timeout: float) -> None:
+        """Wait (up to timeout seconds) until these tracks have been looked up."""
+        tasks = self.prefetch_metadata(tracks)
+        if tasks:
+            await asyncio.wait(tasks, timeout=timeout)
+
+    async def _fetch_metadata(self, track: Track) -> None:
+        try:
+            async with self._metadata_semaphore:
+                if not track.needs_metadata:  # filled in by playback meanwhile
+                    return
+                title, duration = await asyncio.to_thread(self._metadata_fetcher, track.page_url)
+            track.title = track.title or title
+            if track.duration is None:
+                track.duration = duration
+            track.lookup = "done"
+        except ytdl.YTDLError:
+            track.lookup = "failed"
+        except Exception:
+            log.exception("Unexpected error looking up %s", track.page_url)
+            track.lookup = "failed"
+        finally:
+            self._metadata_tasks.pop(id(track), None)
 
     @property
     def is_paused(self) -> bool:
@@ -251,6 +310,7 @@ class GuildPlayer:
                 self.queue.drop_current()
                 announce = True
                 continue
+            self.warm_up_queue()
             if config.DEBUG_VOICE:
                 self.loop.create_task(self._log_voice_health(track, 5))
                 self.loop.create_task(self._log_voice_health(track, 30))
@@ -349,9 +409,10 @@ class GuildPlayer:
         self._generation += 1
         self.queue.reset()
         current = asyncio.current_task()
-        for task in (self._idle_task, self._alone_task):
+        for task in (self._idle_task, self._alone_task, *self._metadata_tasks.values()):
             if task and task is not current:
                 task.cancel()
+        self._metadata_tasks.clear()
         self._idle_task = self._alone_task = None
         if self.voice:
             try:

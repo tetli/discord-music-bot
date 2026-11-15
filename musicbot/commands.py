@@ -47,6 +47,15 @@ def short(text: str, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def queue_entry(track: Track) -> str:
+    """One /queue line: title and duration, or the link if the title isn't known."""
+    if track.title:
+        return f"{esc(short(track.title))} [{format_duration(track.duration)}]"
+    # <...> stops Discord from turning the link into a preview.
+    note = " (couldn't load info)" if track.lookup == "failed" else ""
+    return f"<{track.page_url}>{note}"
+
+
 async def reply(interaction: discord.Interaction, message: str, *, ephemeral: bool = False) -> None:
     """Respond to an interaction whether or not it was deferred."""
     if interaction.response.is_done():
@@ -269,6 +278,11 @@ class Music(commands.Cog):
         pages = max(1, math.ceil(len(upcoming) / config.QUEUE_PAGE_SIZE))
         page = min(page, pages)
         start = (page - 1) * config.QUEUE_PAGE_SIZE
+        page_tracks = upcoming[start : start + config.QUEUE_PAGE_SIZE]
+
+        if any(t.needs_metadata for t in page_tracks):
+            await interaction.response.defer()
+            await player.ensure_metadata(page_tracks, timeout=config.QUEUE_METADATA_TIMEOUT)
 
         lines = []
         if queue.current:
@@ -276,8 +290,8 @@ class Music(commands.Cog):
             lines.append(f"**{state}:** {esc(short(queue.current.label))} [{format_duration(queue.current.duration)}]")
         if upcoming:
             lines.append("")
-            for i, track in enumerate(upcoming[start : start + config.QUEUE_PAGE_SIZE], start=start + 1):
-                lines.append(f"`{i}.` {esc(short(track.label))} [{format_duration(track.duration)}]")
+            for i, track in enumerate(page_tracks, start=start + 1):
+                lines.append(f"`{i}.` {queue_entry(track)}")
             known = [t.duration for t in upcoming if t.duration is not None]
             total = format_duration(sum(known)) + ("+" if len(known) < len(upcoming) else "")
             lines.append("")
@@ -316,6 +330,7 @@ class Music(commands.Cog):
         except IndexError:
             await reply(interaction, f"There is no track at position {position}.", ephemeral=True)
             return
+        player.warm_up_queue()
         await reply(interaction, f"Removed **{esc(track.label)}**.")
 
     @app_commands.command(description="Clear the queue but keep the current track playing")
@@ -337,6 +352,7 @@ class Music(commands.Cog):
             await reply(interaction, "Not enough tracks in the queue to shuffle.", ephemeral=True)
             return
         player.queue.shuffle()
+        player.warm_up_queue()
         await reply(interaction, f"Shuffled {len(player.queue.upcoming)} tracks.")
 
     @app_commands.command(description="Set the loop mode")

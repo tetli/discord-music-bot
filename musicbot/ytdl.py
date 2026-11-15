@@ -59,10 +59,10 @@ def _friendly_message(error: Exception) -> str:
     return "couldn't load this video."
 
 
-def _extract(url: str, **extra) -> dict:
+def _extract(url: str, *, process: bool = True, **extra) -> dict:
     try:
         with yt_dlp.YoutubeDL(_options(**extra)) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=False, process=process)
     except DownloadError as e:
         log.info("yt-dlp failed for %s: %s", url, e)
         raise YTDLError(_friendly_message(e)) from None
@@ -98,6 +98,15 @@ def resolve_stream(page_url: str) -> tuple[str | None, int | None, str]:
     if not stream_url:
         raise YTDLError("no playable audio stream was found.")
     return info.get("title"), _duration(info), stream_url
+
+
+def fetch_metadata(page_url: str) -> tuple[str | None, int | None]:
+    """Return (title, duration) for a video page, for display in the queue.
+
+    process=False skips stream format selection, which isn't needed here.
+    """
+    info = _extract(page_url, process=False)
+    return info.get("title"), _duration(info)
 
 
 def search_or_resolve(query: str, requested_by: str) -> player.Track:

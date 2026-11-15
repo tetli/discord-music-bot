@@ -12,6 +12,7 @@ class FakeYDL:
     result = None
     error = None
     calls: list = []
+    process_flags: list = []
 
     def __init__(self, options):
         self.options = options
@@ -22,9 +23,10 @@ class FakeYDL:
     def __exit__(self, *exc):
         return False
 
-    def extract_info(self, url, download):
+    def extract_info(self, url, download, process=True):
         assert download is False
         FakeYDL.calls.append((url, self.options))
+        FakeYDL.process_flags.append(process)
         if FakeYDL.error:
             raise FakeYDL.error
         return FakeYDL.result
@@ -32,7 +34,7 @@ class FakeYDL:
 
 @pytest.fixture(autouse=True)
 def fake_ydl(monkeypatch):
-    FakeYDL.result, FakeYDL.error, FakeYDL.calls = None, None, []
+    FakeYDL.result, FakeYDL.error, FakeYDL.calls, FakeYDL.process_flags = None, None, [], []
     monkeypatch.setattr(ytdl.yt_dlp, "YoutubeDL", FakeYDL)
     monkeypatch.setattr(ytdl.config, "COOKIES_FILE", None)
     return FakeYDL
@@ -115,3 +117,16 @@ def test_expand_empty_playlist():
     FakeYDL.result = {"entries": []}
     with pytest.raises(ytdl.YTDLError):
         ytdl.expand_playlist("https://www.youtube.com/playlist?list=PL1", "carol")
+
+
+def test_fetch_metadata_skips_format_processing():
+    FakeYDL.result = {"id": "abc", "title": "Vid", "duration": 61.0}
+    assert ytdl.fetch_metadata("https://youtu.be/abc") == ("Vid", 61)
+    assert FakeYDL.process_flags == [False]
+    assert "process" not in FakeYDL.calls[0][1]  # not passed as a YoutubeDL option
+
+
+def test_fetch_metadata_error_is_friendly():
+    FakeYDL.error = DownloadError("ERROR: [youtube] abc: Video unavailable")
+    with pytest.raises(ytdl.YTDLError):
+        ytdl.fetch_metadata("https://youtu.be/abc")

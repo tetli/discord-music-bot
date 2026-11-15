@@ -20,6 +20,8 @@ DEFAULT_VOLUME = 0.5
 IDLE_TIMEOUT = 5 * 60  # seconds with nothing playing before leaving
 ALONE_TIMEOUT = 2 * 60  # seconds alone in the voice channel before leaving
 QUEUE_PAGE_SIZE = 10
+METADATA_CONCURRENCY = 3  # parallel title/duration lookups for the queue view
+QUEUE_METADATA_TIMEOUT = 8  # seconds /queue waits for missing titles before showing the page
 
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"

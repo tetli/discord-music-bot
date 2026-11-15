@@ -198,6 +198,17 @@ def fake_resolver(page_url):
     return name.upper(), 100, f"stream://{name}"
 
 
+metadata_lookups = []
+
+
+def fake_metadata_fetcher(page_url):
+    name = page_url.rsplit("=", 1)[1]
+    metadata_lookups.append(name)
+    if name in BAD:
+        raise ytdl.YTDLError("this video is unavailable.")
+    return f"Title {name}", 120
+
+
 async def settle():
     """Let scheduled tasks and to_thread calls finish."""
     for _ in range(20):
@@ -212,6 +223,7 @@ def make_player():
         loop,
         resolver=fake_resolver,
         source_factory=FakeSource,
+        metadata_fetcher=fake_metadata_fetcher,
         on_destroy=destroyed.append,
     )
     player.voice = FakeVoice()
@@ -428,3 +440,136 @@ def test_voice_health_log_tolerates_missing_internals(caplog):
 
     run(scenario())
 
+
+# ---- metadata lookups for the queue view ------------------------------------
+
+
+def bare_track(name: str) -> Track:
+    """A track as loaded from a playlist file: URL only."""
+    return Track(page_url=f"https://www.youtube.com/watch?v={name}", title=None, duration=None, requested_by="tester")
+
+
+def test_warm_up_looks_up_first_page_only(monkeypatch):
+    monkeypatch.setattr("musicbot.config.QUEUE_PAGE_SIZE", 3)
+    metadata_lookups.clear()
+
+    async def scenario():
+        player, _ = make_player()
+        player.voice.connected = False  # don't start playback; only the queue matters here
+        tracks = [bare_track(f"t{i}") for i in range(8)]
+        player.queue.add(tracks)  # add without triggering playback...
+        player.warm_up_queue()  # ...then warm up as enqueue() would
+        await settle()
+        assert sorted(metadata_lookups) == ["t0", "t1", "t2"]
+        assert tracks[0].title == "Title t0" and tracks[0].duration == 120
+        assert tracks[5].title is None and tracks[5].lookup == "pending"
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_ensure_metadata_fills_requested_page():
+    metadata_lookups.clear()
+
+    async def scenario():
+        player, _ = make_player()
+        tracks = [bare_track(f"p{i}") for i in range(5)]
+        await player.ensure_metadata(tracks[2:4], timeout=2)
+        assert [t.title for t in tracks] == [None, None, "Title p2", "Title p3", None]
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_known_metadata_and_flat_titles_are_kept():
+    metadata_lookups.clear()
+
+    async def scenario():
+        player, _ = make_player()
+        complete = make_track("full")
+        flat = Track(page_url="https://www.youtube.com/watch?v=flat", title="Flat title", duration=None, requested_by="x")
+        await player.ensure_metadata([complete, flat], timeout=2)
+        assert metadata_lookups == ["flat"]  # complete track not looked up
+        assert flat.title == "Flat title" and flat.duration == 120
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_failed_lookup_is_marked_and_not_retried():
+    metadata_lookups.clear()
+
+    async def scenario():
+        player, _ = make_player()
+        track = bare_track("bad")
+        await player.ensure_metadata([track], timeout=2)
+        assert track.lookup == "failed" and track.title is None
+        await player.ensure_metadata([track], timeout=2)
+        assert metadata_lookups == ["bad"]
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_same_track_is_looked_up_once_while_in_flight():
+    metadata_lookups.clear()
+
+    async def scenario():
+        player, _ = make_player()
+        track = bare_track("dup")
+        player.prefetch_metadata([track])
+        player.prefetch_metadata([track])
+        await player.ensure_metadata([track], timeout=2)
+        assert metadata_lookups == ["dup"]
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_lookups_are_limited_in_parallel(monkeypatch):
+    monkeypatch.setattr("musicbot.config.METADATA_CONCURRENCY", 2)
+    import threading
+    import time
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def slow_fetcher(page_url):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with guard:
+            active -= 1
+        return "T", 1
+
+    async def scenario():
+        player = GuildPlayer(1, asyncio.get_running_loop(), resolver=fake_resolver, metadata_fetcher=slow_fetcher)
+        tracks = [bare_track(f"c{i}") for i in range(6)]
+        await player.ensure_metadata(tracks, timeout=5)
+        assert all(t.title == "T" for t in tracks)
+        assert peak == 2
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_ensure_metadata_gives_up_after_timeout():
+    import time
+
+    def very_slow(page_url):
+        time.sleep(0.5)
+        return "Late", 1
+
+    async def scenario():
+        player = GuildPlayer(1, asyncio.get_running_loop(), resolver=fake_resolver, metadata_fetcher=very_slow)
+        track = bare_track("slow")
+        started = asyncio.get_running_loop().time()
+        await player.ensure_metadata([track], timeout=0.1)
+        assert asyncio.get_running_loop().time() - started < 0.4
+        assert track.title is None
+        await player.destroy()
+
+    run(scenario())
