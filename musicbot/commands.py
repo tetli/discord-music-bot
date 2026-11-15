@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from typing import Literal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from musicbot import ytdl
+from musicbot import config, ytdl
 from musicbot.player import GuildPlayer, format_duration
 
 log = logging.getLogger(__name__)
@@ -22,12 +24,23 @@ HELP_TEXT = """\
 `/skip` - skip the current track
 `/stop` - stop and clear the queue
 `/leave` - stop and leave the voice channel
+`/queue [page]` - show the queue
+`/nowplaying` - show the current track
+`/remove <position>` - remove a track from the queue
+`/clear` - clear the queue (keeps the current track)
+`/shuffle` - shuffle the queue
+`/loop <off|track|queue>` - set the loop mode
+`/volume <0-100>` - set the volume
 `/help` - this list
 """
 
 
 def esc(text: str) -> str:
     return discord.utils.escape_markdown(text)
+
+
+def short(text: str, limit: int = 80) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 async def reply(interaction: discord.Interaction, message: str, *, ephemeral: bool = False) -> None:
@@ -215,6 +228,114 @@ class Music(commands.Cog):
             return
         await player.destroy()
         await reply(interaction, "Bye!")
+
+    @app_commands.command(name="queue", description="Show the queue")
+    @app_commands.describe(page="Page number (10 tracks per page)")
+    @app_commands.guild_only()
+    async def queue_(self, interaction: discord.Interaction, page: app_commands.Range[int, 1] = 1):
+        player = self.get_player(interaction.guild)
+        if player is None or (player.queue.current is None and not player.queue.upcoming):
+            await reply(interaction, "The queue is empty.", ephemeral=True)
+            return
+        queue = player.queue
+        upcoming = list(queue.upcoming)
+        pages = max(1, math.ceil(len(upcoming) / config.QUEUE_PAGE_SIZE))
+        page = min(page, pages)
+        start = (page - 1) * config.QUEUE_PAGE_SIZE
+
+        lines = []
+        if queue.current:
+            state = "Paused" if player.is_paused else "Now playing"
+            lines.append(f"**{state}:** {esc(short(queue.current.label))} [{format_duration(queue.current.duration)}]")
+        if upcoming:
+            lines.append("")
+            for i, track in enumerate(upcoming[start : start + config.QUEUE_PAGE_SIZE], start=start + 1):
+                lines.append(f"`{i}.` {esc(short(track.label))} [{format_duration(track.duration)}]")
+            known = [t.duration for t in upcoming if t.duration is not None]
+            total = format_duration(sum(known)) + ("+" if len(known) < len(upcoming) else "")
+            lines.append("")
+            lines.append(f"{len(upcoming)} tracks in queue, {total} total. Page {page}/{pages}.")
+        else:
+            lines.append("Nothing else is queued.")
+        if queue.loop_mode != "off":
+            lines.append(f"Loop: {queue.loop_mode}")
+        await reply(interaction, "\n".join(lines))
+
+    @app_commands.command(description="Show the current track")
+    @app_commands.guild_only()
+    async def nowplaying(self, interaction: discord.Interaction):
+        player = self.get_player(interaction.guild)
+        track = player.queue.current if player else None
+        if track is None:
+            await reply(interaction, "Nothing is playing.", ephemeral=True)
+            return
+        state = " (paused)" if player.is_paused else ""
+        await reply(
+            interaction,
+            f"**{esc(track.label)}**{state}\n"
+            f"<{track.page_url}>\n"
+            f"Duration: {format_duration(track.duration)} · Requested by {esc(track.requested_by)}",
+        )
+
+    @app_commands.command(description="Remove a track from the queue")
+    @app_commands.describe(position="Position in the queue (see /queue)")
+    @app_commands.guild_only()
+    async def remove(self, interaction: discord.Interaction, position: app_commands.Range[int, 1]):
+        player = await self.control_player(interaction)
+        if player is None:
+            return
+        try:
+            track = player.queue.remove(position)
+        except IndexError:
+            await reply(interaction, f"There is no track at position {position}.", ephemeral=True)
+            return
+        await reply(interaction, f"Removed **{esc(track.label)}**.")
+
+    @app_commands.command(description="Clear the queue but keep the current track playing")
+    @app_commands.guild_only()
+    async def clear(self, interaction: discord.Interaction):
+        player = await self.control_player(interaction)
+        if player is None:
+            return
+        count = player.queue.clear()
+        await reply(interaction, f"Cleared {count} track{'s' if count != 1 else ''} from the queue.")
+
+    @app_commands.command(description="Shuffle the queue")
+    @app_commands.guild_only()
+    async def shuffle(self, interaction: discord.Interaction):
+        player = await self.control_player(interaction)
+        if player is None:
+            return
+        if len(player.queue.upcoming) < 2:
+            await reply(interaction, "Not enough tracks in the queue to shuffle.", ephemeral=True)
+            return
+        player.queue.shuffle()
+        await reply(interaction, f"Shuffled {len(player.queue.upcoming)} tracks.")
+
+    @app_commands.command(description="Set the loop mode")
+    @app_commands.describe(mode="off, track (repeat current) or queue (repeat everything)")
+    @app_commands.guild_only()
+    async def loop(self, interaction: discord.Interaction, mode: Literal["off", "track", "queue"]):
+        player = await self.control_player(interaction)
+        if player is None:
+            return
+        player.queue.loop_mode = mode
+        messages = {
+            "off": "Loop is off.",
+            "track": "Looping the current track.",
+            "queue": "Looping the queue.",
+        }
+        await reply(interaction, messages[mode])
+
+    @app_commands.command(description="Set the volume")
+    @app_commands.describe(level="Volume from 0 to 100")
+    @app_commands.guild_only()
+    async def volume(self, interaction: discord.Interaction, level: app_commands.Range[int, 0, 100]):
+        player = await self.control_player(interaction)
+        if player is None:
+            return
+        player.set_volume(level / 100)
+        await reply(interaction, f"Volume set to {level}%.")
 
     # ---- errors ---------------------------------------------------------------
 
