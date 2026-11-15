@@ -117,6 +117,7 @@ class Music(commands.Cog):
         player = self.get_or_create_player(guild)
         player.voice = voice
         player.text_channel = interaction.channel
+        player.update_alone_timer()
         return player
 
     async def control_player(self, interaction: discord.Interaction) -> GuildPlayer | None:
@@ -456,6 +457,25 @@ class Music(commands.Cog):
             await reply(interaction, f"Added <{url.strip()}> to `{name}`.")
 
     playlist_add.autocomplete("name")(playlist_name_autocomplete)
+
+    # ---- voice events -------------------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        player = self.get_player(member.guild)
+        if player is None:
+            return
+        if member.id == self.bot.user.id:
+            if after.channel is None:
+                # Disconnected by a user (or by us, in which case the player is already gone).
+                log.info("Disconnected from voice in guild %s", member.guild.id)
+                await player.destroy()
+            else:
+                player.update_alone_timer()  # moved to another channel
+            return
+        bot_channel = player.voice.channel if player.voice else None
+        if bot_channel is not None and bot_channel in (before.channel, after.channel):
+            player.update_alone_timer()
 
     # ---- errors ---------------------------------------------------------------
 

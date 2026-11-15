@@ -343,3 +343,68 @@ def test_destroy_disconnects_and_notifies():
         assert voice.played_urls == ["stream://a"]  # after-callback didn't start "b"
 
     run(scenario())
+
+
+class FakeMember:
+    def __init__(self, bot):
+        self.bot = bot
+
+
+class FakeVoiceChannel:
+    def __init__(self, members):
+        self.members = members
+
+
+def test_idle_timeout_disconnects(monkeypatch):
+    monkeypatch.setattr("musicbot.config.IDLE_TIMEOUT", 0.05)
+
+    async def scenario():
+        player, destroyed = make_player()
+        player.enqueue([make_track("a")])
+        await settle()
+        player.voice.finish()
+        await asyncio.sleep(0.2)
+        assert destroyed == [1]
+        assert any("left the voice channel" in m for m in player.text_channel.messages)
+
+    run(scenario())
+
+
+def test_idle_timer_cancelled_when_music_starts(monkeypatch):
+    monkeypatch.setattr("musicbot.config.IDLE_TIMEOUT", 0.1)
+
+    async def scenario():
+        player, destroyed = make_player()
+        player.start_idle_timer()
+        player.enqueue([make_track("a")])
+        await asyncio.sleep(0.25)
+        assert destroyed == []
+        await player.destroy()
+
+    run(scenario())
+
+
+def test_alone_timer(monkeypatch):
+    monkeypatch.setattr("musicbot.config.ALONE_TIMEOUT", 0.1)
+
+    async def scenario():
+        player, destroyed = make_player()
+        channel = FakeVoiceChannel([FakeMember(bot=True), FakeMember(bot=False)])
+        player.voice.channel = channel
+        player.update_alone_timer()
+        assert player._alone_task is None
+
+        channel.members = [FakeMember(bot=True)]  # the human left
+        player.update_alone_timer()
+        await asyncio.sleep(0.05)
+        channel.members.append(FakeMember(bot=False))  # ...and came back in time
+        player.update_alone_timer()
+        await asyncio.sleep(0.15)
+        assert destroyed == []
+
+        channel.members = [FakeMember(bot=True)]
+        player.update_alone_timer()
+        await asyncio.sleep(0.2)
+        assert destroyed == [1]
+
+    run(scenario())
