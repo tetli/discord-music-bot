@@ -50,7 +50,7 @@ def _friendly_message(error: Exception) -> str:
         return "this video is private."
     if "age" in lowered and ("restricted" in lowered or "confirm your age" in lowered):
         return "this video is age-restricted."
-    if "not available in your country" in lowered or "blocked it in your country" in lowered:
+    if "in your country" in lowered:
         return "this video is blocked in this region."
     if "video unavailable" in lowered or "has been removed" in lowered:
         return "this video is unavailable."

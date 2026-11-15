@@ -5,20 +5,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import random
 from typing import Literal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from musicbot import config, ytdl
-from musicbot.player import GuildPlayer, format_duration
+from musicbot import config, playlists, ytdl
+from musicbot.player import GuildPlayer, Track, format_duration
 
 log = logging.getLogger(__name__)
 
 HELP_TEXT = """\
 **Music bot commands**
-`/play <query>` - play a YouTube link or search
+`/play <query>` - play a YouTube link, playlist link, or search
+`/playlist load <name> [shuffle]` - queue a playlist file
+`/playlist list` - list playlist files
+`/playlist add <name> <url>` - add a link to a playlist file
 `/join` - join your voice channel
 `/pause` / `/resume` - pause or resume
 `/skip` - skip the current track
@@ -159,8 +163,30 @@ class Music(commands.Cog):
         if error:
             await reply(interaction, error, ephemeral=True)
             return
+        if query.startswith(("http://", "https://")) and not playlists.is_youtube_url(query):
+            await reply(interaction, "I can only play YouTube links (or search text).", ephemeral=True)
+            return
         await interaction.response.defer()
         requested_by = interaction.user.display_name
+
+        if playlists.is_playlist_url(query):
+            try:
+                tracks = await asyncio.to_thread(ytdl.expand_playlist, query, requested_by)
+            except ytdl.YTDLError as e:
+                await reply(interaction, f"Couldn't load that playlist: {e}")
+                return
+            capped = len(tracks) > config.MAX_PLAYLIST_ENTRIES
+            tracks = tracks[: config.MAX_PLAYLIST_ENTRIES]
+            player = await self.connect(interaction, channel)
+            if player is None:
+                return
+            position = player.enqueue(tracks)
+            message = f"Queued {len(tracks)} tracks from the playlist (starting at position {position})."
+            if capped:
+                message += f" The playlist was cut off at {config.MAX_PLAYLIST_ENTRIES} tracks."
+            await reply(interaction, message)
+            return
+
         try:
             track = await asyncio.to_thread(ytdl.search_or_resolve, query, requested_by)
         except ytdl.YTDLError as e:
@@ -336,6 +362,100 @@ class Music(commands.Cog):
             return
         player.set_volume(level / 100)
         await reply(interaction, f"Volume set to {level}%.")
+
+    # ---- playlist files ---------------------------------------------------------
+
+    playlist = app_commands.Group(name="playlist", description="Playlist files in the playlists folder", guild_only=True)
+
+    @playlist.command(name="load", description="Queue all tracks from a playlist file")
+    @app_commands.describe(name="Playlist name (file playlists/<name>.txt)", shuffle="Shuffle the tracks before queueing")
+    async def playlist_load(self, interaction: discord.Interaction, name: str, shuffle: bool = False):
+        channel, error = self.join_target(interaction)
+        if error:
+            await reply(interaction, error, ephemeral=True)
+            return
+        try:
+            playlists.playlist_path(name)
+        except playlists.PlaylistError as e:
+            await reply(interaction, str(e), ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            parsed = await asyncio.to_thread(playlists.read_playlist, name)
+        except playlists.PlaylistError as e:
+            await reply(interaction, str(e))
+            return
+
+        requested_by = interaction.user.display_name
+        tracks: list[Track] = []
+        failed_playlists = 0
+        for url in parsed.urls:
+            if playlists.is_playlist_url(url):
+                try:
+                    tracks.extend(await asyncio.to_thread(ytdl.expand_playlist, url, requested_by))
+                except ytdl.YTDLError:
+                    failed_playlists += 1
+            else:
+                tracks.append(Track(page_url=url, title=None, duration=None, requested_by=requested_by))
+        capped = parsed.capped or len(tracks) > config.MAX_PLAYLIST_ENTRIES
+        tracks = tracks[: config.MAX_PLAYLIST_ENTRIES]
+
+        notes = []
+        if parsed.skipped_lines:
+            shown = ", ".join(str(n) for n in parsed.skipped_lines[:20])
+            more = "…" if len(parsed.skipped_lines) > 20 else ""
+            count = len(parsed.skipped_lines)
+            notes.append(f"Skipped {count} invalid line{'s' if count != 1 else ''} (line {shown}{more}).")
+        if failed_playlists:
+            notes.append(f"Couldn't load {failed_playlists} YouTube playlist link{'s' if failed_playlists != 1 else ''}.")
+        if capped:
+            notes.append(f"Stopped at the limit of {config.MAX_PLAYLIST_ENTRIES} tracks.")
+
+        if not tracks:
+            await reply(interaction, " ".join([f"`{name}` has no playable entries."] + notes))
+            return
+        if shuffle:
+            random.shuffle(tracks)
+        player = await self.connect(interaction, channel)
+        if player is None:
+            return
+        player.enqueue(tracks)
+        shuffled = " (shuffled)" if shuffle else ""
+        message = f"Queued {len(tracks)} track{'s' if len(tracks) != 1 else ''} from `{name}`{shuffled}."
+        await reply(interaction, " ".join([message] + notes))
+
+    @playlist_load.autocomplete("name")
+    async def playlist_name_autocomplete(self, interaction: discord.Interaction, current: str):
+        current = current.lower()
+        names = [n for n in playlists.playlist_names() if current in n.lower()]
+        return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+    @playlist.command(name="list", description="List the playlist files")
+    async def playlist_list(self, interaction: discord.Interaction):
+        found = await asyncio.to_thread(playlists.list_playlists)
+        if not found:
+            await reply(interaction, "No playlists yet. Put `.txt` files in the `playlists` folder.", ephemeral=True)
+            return
+        lines = [f"`{name}` - {count} entr{'ies' if count != 1 else 'y'}" for name, count in found]
+        text = "**Playlists**\n" + "\n".join(lines)
+        if len(text) > 1900:
+            text = text[:1900] + "\n…"
+        await reply(interaction, text)
+
+    @playlist.command(name="add", description="Add a YouTube link to a playlist file (creates it if needed)")
+    @app_commands.describe(name="Playlist name", url="YouTube video or playlist URL")
+    async def playlist_add(self, interaction: discord.Interaction, name: str, url: str):
+        try:
+            created = await asyncio.to_thread(playlists.add_to_playlist, name, url)
+        except playlists.PlaylistError as e:
+            await reply(interaction, str(e), ephemeral=True)
+            return
+        if created:
+            await reply(interaction, f"Created playlist `{name}` and added <{url.strip()}>.")
+        else:
+            await reply(interaction, f"Added <{url.strip()}> to `{name}`.")
+
+    playlist_add.autocomplete("name")(playlist_name_autocomplete)
 
     # ---- errors ---------------------------------------------------------------
 

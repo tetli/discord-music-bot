@@ -1,0 +1,9 @@
+# Example playlist. Load it with: /playlist load example
+# One YouTube link per line. Lines starting with # and blank lines are ignored.
+# Replace these placeholder links with your own.
+
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://youtu.be/9bZkp7q19f0
+
+# A YouTube playlist link is expanded into all of its videos:
+# https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxxx
