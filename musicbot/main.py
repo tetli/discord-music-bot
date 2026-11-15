@@ -19,6 +19,7 @@ class MusicBot(commands.Bot):
         intents.voice_states = True
         # The prefix is never used; all commands are slash commands.
         super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
+        self.players: dict = {}  # guild id -> GuildPlayer
 
     async def setup_hook(self):
         await self.load_extension("musicbot.commands")
