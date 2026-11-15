@@ -251,12 +251,55 @@ class GuildPlayer:
                 self.queue.drop_current()
                 announce = True
                 continue
+            if config.DEBUG_VOICE:
+                self.loop.create_task(self._log_voice_health(track, 5))
+                self.loop.create_task(self._log_voice_health(track, 30))
             if announce:
                 await self.send(
                     f"Now playing: **{discord.utils.escape_markdown(track.label)}** "
                     f"[{format_duration(track.duration)}]"
                 )
             return
+
+    async def _log_voice_health(self, track: Track, delay: float = 5.0) -> None:
+        """Log what the voice client is doing a few seconds into a track (DEBUG_VOICE only).
+
+        Uses discord.py internals; diagnostics only. If frames are being sent but
+        dave_ready is False while dave_version > 0, listeners drop the audio.
+        """
+        await asyncio.sleep(delay)
+        voice = self.voice
+        if voice is None or self.queue.current is not track:
+            return
+        audio_player = getattr(voice, "_player", None)
+        connection = getattr(voice, "_connection", None)
+        dave_session = getattr(connection, "dave_session", None)
+        dave_details = "no session"
+        if dave_session is not None:
+            try:
+                stats = dave_session.get_encryption_stats()
+                dave_details = (
+                    f"status={dave_session.status} can_encrypt={dave_session.can_encrypt} "
+                    f"epoch={dave_session.epoch} group_users={len(dave_session.get_user_ids())} "
+                    f"encrypt_ok={stats.successes} encrypt_failed={stats.failures}"
+                )
+            except Exception as e:
+                dave_details = f"unavailable ({e!r})"
+        log.info(
+            "Voice health guild=%s after %ss: connected=%s playing=%s paused=%s frames_sent=%s "
+            "mode=%s dave_version=%s dave_ready=%s endpoint=%s dave: %s",
+            self.guild_id,
+            delay,
+            voice.is_connected(),
+            voice.is_playing(),
+            voice.is_paused(),
+            getattr(audio_player, "loops", None),
+            getattr(voice, "mode", None),
+            getattr(connection, "dave_protocol_version", None),
+            getattr(dave_session, "ready", None),
+            getattr(voice, "endpoint", None),
+            dave_details,
+        )
 
     # ---- messages, timers, cleanup -----------------------------------------
 

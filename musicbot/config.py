@@ -10,6 +10,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip() or None
+# DEBUG_VOICE=1 turns on voice/playback debug logging and a per-track health check.
+DEBUG_VOICE = os.getenv("DEBUG_VOICE", "").strip().lower() in ("1", "true", "yes")
 
 PLAYLISTS_DIR = PROJECT_ROOT / "playlists"
 MAX_PLAYLIST_ENTRIES = 500

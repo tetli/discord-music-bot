@@ -207,7 +207,13 @@ async def settle():
 def make_player():
     loop = asyncio.get_running_loop()
     destroyed = []
-    player = GuildPlayer(1, loop, resolver=fake_resolver, source_factory=FakeSource, on_destroy=destroyed.append)
+    player = GuildPlayer(
+        1,
+        loop,
+        resolver=fake_resolver,
+        source_factory=FakeSource,
+        on_destroy=destroyed.append,
+    )
     player.voice = FakeVoice()
     player.text_channel = FakeChannel()
     return player, destroyed
@@ -408,3 +414,17 @@ def test_alone_timer(monkeypatch):
         assert destroyed == [1]
 
     run(scenario())
+
+
+def test_voice_health_log_tolerates_missing_internals(caplog):
+    async def scenario():
+        player, _ = make_player()
+        player.enqueue([make_track("a")])
+        await settle()
+        with caplog.at_level("INFO", logger="musicbot.player"):
+            await player._log_voice_health(player.queue.current, delay=0)
+        assert "frames_sent=None" in caplog.text and "playing=True" in caplog.text
+        await player.destroy()
+
+    run(scenario())
+

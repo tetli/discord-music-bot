@@ -105,7 +105,18 @@ See `playlists/example.txt`.
 
 **Slash commands don't appear**: make sure the invite URL included the `applications.commands` scope, then restart Discord.
 
-**No sound but "Now playing" shows**: check the bot's user volume in Discord (right-click the bot in the voice channel) and `/volume`.
+**No sound, but "Now playing" shows and the bot has the green speaking ring**
+
+Known cause: `davey` 0.2.0 (the library for Discord's end-to-end voice encryption, DAVE) is installed with discord.py 2.7.1. Since 0.2.0, davey only switches on its encryption key when the caller runs an extra "transition" step, and discord.py 2.7.1 doesn't do that. The bot joins the encrypted call, but never gets a key, so it sends unencrypted audio that everyone's Discord client silently drops. `requirements.txt` pins `davey<0.2` for this reason, the start scripts apply it on every run, and the bot prints a warning at startup if an incompatible davey is installed. Fix by hand: `pip install "davey<0.2"`. Only remove the pin once a discord.py release supports davey 0.2.
+
+If that's not it:
+
+1. Check the bot's user volume in Discord (right-click the bot in the voice channel) and `/volume`.
+2. Make sure the voice extras are installed: `pip list | grep -i -E "nacl|davey"` should show both `PyNaCl` and `davey` (they come from `discord.py[voice]` in `requirements.txt`). `pip show discord.py` doesn't list them because they are optional extras.
+3. Set `DEBUG_VOICE=1` in `.env`, restart, and play a song. Five seconds in, the console shows a `Voice health` line:
+   - `frames_sent` stays near 0: audio isn't leaving ffmpeg/the player. Look for ffmpeg warnings just above it.
+   - `frames_sent` grows (about 50 per second) but `dave_version` is above 0 and `dave_ready=False`: Discord's end-to-end voice encryption (DAVE) never finished setting up, so the bot sends audio listeners can't decrypt. Run `pip install -U discord.py davey` and reconnect the bot.
+   - `frames_sent` grows and `dave_ready=True` (or `dave_version=0`): the audio is sent correctly but doesn't arrive. That points at the network path for voice (outgoing UDP): a VPN, firewall, or WSL2's NAT network mode. Try running the bot directly on Windows/macOS/Linux instead of in WSL, or turn off the VPN.
 
 ## Development
 

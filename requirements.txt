@@ -1,3 +1,6 @@
 discord.py[voice]>=2.4
+# davey 0.2 requires callers to activate DAVE keys with prepare/execute_transition,
+# which discord.py 2.7.1 doesn't do: the bot connects but listeners hear nothing.
+davey>=0.1,<0.2
 yt-dlp
 python-dotenv>=1.0

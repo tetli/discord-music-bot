@@ -10,10 +10,10 @@ if not exist ".venv\Scripts\python.exe" (
         pause
         exit /b 1
     )
-    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 )
 
-echo Updating yt-dlp...
+echo Checking dependencies and updating yt-dlp...
+".venv\Scripts\python.exe" -m pip install -q -r requirements.txt
 ".venv\Scripts\python.exe" -m pip install -q -U yt-dlp
 
 echo Starting the bot...
